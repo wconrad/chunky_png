@@ -225,42 +225,6 @@ module ChunkyPNG
       self.rgba(*rgb)
     end
 
-    # Convert one HSL or HSV triple and associated chroma to a scaled rgb triple
-    #
-    # This method encapsulates the shared mathematical operations needed to
-    # convert coordinates from a cylindrical colorspace such as HSL or HSV into
-    # coordinates of the RGB colorspace.
-    #
-    # Even though chroma values are derived from the other three coordinates,
-    # the formula for calculating chroma differs for each colorspace.  Since it
-    # is calculated differently for each colorspace, it must be passed in as
-    # a parameter.
-    #
-    # @param [Fixnum] hue The hue-component (0-360)
-    # @param [Fixnum] saturation The saturation-component (0-1)
-    # @param [Fixnum] y_component The y_component can represent either lightness
-    #     or brightness/value (0-1) depending on which scheme (HSV/HSL) is being used.
-    # @param [Fixnum] chroma The associated chroma value.
-    # @return [Array<Fixnum>] A scaled r,g,b triple. Scheme-dependent
-    #    adjustments are still needed to reach the true r,g,b values.
-    # @see http://en.wikipedia.org/wiki/HSL_and_HSV
-    # @see http://www.tomjewett.com/colors/hsb.html
-    # @private
-    def cylindrical_to_cubic(hue, saturation, y_component, chroma)
-      hue_prime = hue.fdiv(60)
-      x = chroma * (1 - (hue_prime % 2 - 1).abs)
-
-      case hue_prime
-      when (0...1); [chroma, x, 0]
-      when (1...2); [x, chroma, 0]
-      when (2...3); [0, chroma, x]
-      when (3...4); [0, x, chroma]
-      when (4...5); [x, 0, chroma]
-      when (5...6); [chroma, 0, x]
-      end
-    end
-    private :cylindrical_to_cubic
-
     ####################################################################
     # PROPERTIES
     ####################################################################
@@ -331,20 +295,6 @@ module ChunkyPNG
     ####################################################################
     # ALPHA COMPOSITION
     ####################################################################
-
-    # Multiplies two fractions using integer math, where the fractions are
-    # stored using an integer between 0 and 255. This method is used as a
-    # helper method for compositing colors using integer math.
-    #
-    # This is a quicker implementation of ((a * b) / 255.0).round.
-    #
-    # @param [Integer] a The first fraction.
-    # @param [Integer] b The second fraction.
-    # @return [Integer] The result of the multiplication.
-    def int8_mult(a, b)
-      t = a * b + 0x80
-      ((t >> 8) + t) >> 8
-    end
 
     # Composes two colors with an alpha channel using integer math.
     #
@@ -625,34 +575,44 @@ module ChunkyPNG
                       [hue, saturation, lightness]
     end
 
-    # This method encapsulates the logic needed to extract hue and chroma from
-    # a ChunkPNG color. This logic is shared by the cylindrical HSV/HSB and HSL
-    # color space models.
+    # Returns a color RGBA integer for given CMYK values.
     #
-    # @param [Integer] A ChunkyPNG color.
-    # @return [Fixnum] hue The hue of the color (0-360)
-    # @return [Fixnum] chroma The chroma of the color (0-1)
-    # @return [Fixnum] max The magnitude of the largest scaled rgb component (0-1)
-    # @return [Fixnum] min The magnitude of the smallest scaled rgb component (0-1)
-    # @private
-    def hue_and_chroma(color)
-      scaled_rgb      = to_truecolor_bytes(color)
-      scaled_rgb.map! { |component| component.fdiv(255) }
-      min, max = scaled_rgb.minmax
-      chroma   = max - min
-
-      r, g, b   = scaled_rgb
-      hue_prime = chroma.zero? ? 0 : case max
-                                     when r; (g - b).fdiv(chroma)
-                                     when g; (b - r).fdiv(chroma) + 2
-                                     when b; (r - g).fdiv(chroma) + 4
-                                     else 0
-                                     end
-      hue = 60 * hue_prime
-
-      return hue.round, chroma, max, min
+    # @param [Integer] c The cyan component of the color, between 0 and 255.
+    # @param [Integer] m The magento component of the color, between 0 and 255.
+    # @param [Integer] y The yellow component of the color, between 0 and 255.
+    # @param [Integer] k The key component of the color, between 0 and 255.
+    # @param [Integer] a The alpha component to use for the RGBA color, between 0 and 255.
+    # @return [Integer] The color in RGBA.
+    def from_cmyk(c, m, y, k, a = 0xff)
+      k_complement = 0xff - k
+      r = int8_mult(int8_mult(0xff, 0xff - c), k_complement)
+      g = int8_mult(int8_mult(0xff, 0xff - m), k_complement)
+      b = int8_mult(int8_mult(0xff, 0xff - y), k_complement)
+      rgba(r, g, b, a)
     end
-    private :hue_and_chroma
+
+    # Returns CMYK values for a color given as an RGBA integer.
+    #
+    # @param [Float] c The cyan component of the color, between 0 and 1.
+    # @param [Float] m The magento component of the color, between 0 and 1.
+    # @param [Float] y The yellow component of the color, between 0 and 1.
+    # @param [Float] k The key component of the color, between 0 and 1.
+    # @param [Integer] a The alpha component to use for the color, between 0 and 255.
+    # @return [Integer] The color in RGBA. A will always be 1.
+    def to_cmyk(color, include_alpha = false)
+      r = r(color)
+      g = g(color)
+      b = b(color)
+
+      k_complement = [r, g, b].max
+      k = 0xff - k_complement
+
+      c = (k == 0xff) ? 0x00 : int8_div(k_complement - r, k_complement)
+      m = (k == 0xff) ? 0x00 : int8_div(k_complement - g, k_complement)
+      y = (k == 0xff) ? 0x00 : int8_div(k_complement - b, k_complement)
+
+      include_alpha ? [c,m,y,k,a(color)] : [c,m,y,k]
+    end
 
     # Returns an array with the separate RGBA values for this color.
     #
@@ -977,5 +937,100 @@ module ChunkyPNG
       return 0 if width == 0 || height == 0
       (scanline_bytesize(color_mode, depth, width) + 1) * height
     end
+
+    #############################################################################
+    # PRIVATE HELPER METHODS
+    #############################################################################
+
+    # This method encapsulates the logic needed to extract hue and chroma from
+    # a ChunkPNG color. This logic is shared by the cylindrical HSV/HSB and HSL
+    # color space models.
+    #
+    # @param [Integer] A ChunkyPNG color.
+    # @return [Fixnum] hue The hue of the color (0-360)
+    # @return [Fixnum] chroma The chroma of the color (0-1)
+    # @return [Fixnum] max The magnitude of the largest scaled rgb component (0-1)
+    # @return [Fixnum] min The magnitude of the smallest scaled rgb component (0-1)
+    # @private
+    def hue_and_chroma(color)
+      scaled_rgb      = to_truecolor_bytes(color)
+      scaled_rgb.map! { |component| component.fdiv(255) }
+      min, max = scaled_rgb.minmax
+      chroma   = max - min
+
+      r, g, b   = scaled_rgb
+      hue_prime = chroma.zero? ? 0 : case max
+                                     when r; (g - b).fdiv(chroma)
+                                     when g; (b - r).fdiv(chroma) + 2
+                                     when b; (r - g).fdiv(chroma) + 4
+                                     else 0
+                                     end
+      hue = 60 * hue_prime
+
+      return hue.round, chroma, max, min
+    end
+    private :hue_and_chroma
+
+    # Convert one HSL or HSV triple and associated chroma to a scaled rgb triple
+    #
+    # This method encapsulates the shared mathematical operations needed to
+    # convert coordinates from a cylindrical colorspace such as HSL or HSV into
+    # coordinates of the RGB colorspace.
+    #
+    # Even though chroma values are derived from the other three coordinates,
+    # the formula for calculating chroma differs for each colorspace.  Since it
+    # is calculated differently for each colorspace, it must be passed in as
+    # a parameter.
+    #
+    # @param [Fixnum] hue The hue-component (0-360)
+    # @param [Fixnum] saturation The saturation-component (0-1)
+    # @param [Fixnum] y_component The y_component can represent either lightness
+    #     or brightness/value (0-1) depending on which scheme (HSV/HSL) is being used.
+    # @param [Fixnum] chroma The associated chroma value.
+    # @return [Array<Fixnum>] A scaled r,g,b triple. Scheme-dependent
+    #    adjustments are still needed to reach the true r,g,b values.
+    # @see http://en.wikipedia.org/wiki/HSL_and_HSV
+    # @see http://www.tomjewett.com/colors/hsb.html
+    # @private
+    def cylindrical_to_cubic(hue, saturation, y_component, chroma)
+      hue_prime = hue.fdiv(60)
+      x = chroma * (1 - (hue_prime % 2 - 1).abs)
+
+      case hue_prime
+      when (0...1); [chroma, x, 0]
+      when (1...2); [x, chroma, 0]
+      when (2...3); [0, chroma, x]
+      when (3...4); [0, x, chroma]
+      when (4...5); [x, 0, chroma]
+      when (5...6); [chroma, 0, x]
+      end
+    end
+    private :cylindrical_to_cubic
+
+    # Multiplies two fractions using integer math, where the fractions are
+    # stored using an integer between 0 and 255. This method is used as a
+    # helper method for compositing colors using integer math.
+    #
+    # This is a quicker implementation of ((a * b) / 255.0).round.
+    #
+    # @param a [Integer] The first fraction.
+    # @param b [Integer] The second fraction.
+    # @return [Integer] The result of the multiplication.
+    def int8_mult(a, b)
+      t = a * b + 0x80
+      ((t >> 8) + t) >> 8
+    end
+    private :int8_mult
+
+    # Divides two fractions, where fractions are represented by integers
+    # between 0 and 255.
+    #
+    # @return a [Integer] The numerator fraction between 0 and 255
+    # @return b [Integer] The denumerator fraction between 0 and 255
+    # @return [Integer] The result of the division between 0 and 255
+    def int8_div(a, b)
+      ((a.to_f / b.to_f) * 255.0).round
+    end
+    private :int8_div
   end
 end
